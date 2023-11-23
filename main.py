@@ -6,7 +6,7 @@ from multiprocessing import Pool
 import mysql.connector
 import re
 
-
+# New Jarvis
 def sanitize_filename(title):
     # Replace invalid file name characters with an underscore
     return re.sub(r'[\\/:*?"<>|\|\t\n\r]', "_", title)
@@ -105,7 +105,7 @@ def store_data(db_config, video_url, video_path, audio_path, transcript):
     cursor.close()
     conn.close()
 
-#  test 
+#  test
 
 def main():
     video_url = "https://www.youtube.com/watch?v=LJA5BQLC9Ds"
