@@ -105,7 +105,7 @@ def store_data(db_config, video_url, video_path, audio_path, transcript):
     cursor.close()
     conn.close()
 
-
+#  test 
 
 def main():
     video_url = "https://www.youtube.com/watch?v=LJA5BQLC9Ds"
