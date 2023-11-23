@@ -5,6 +5,7 @@ from pytube import YouTube
 from multiprocessing import Pool
 import mysql.connector
 import re
+import time
 
 # New Jarvis
 def sanitize_filename(title):
@@ -38,20 +39,18 @@ def extract_audio(video_path, download_path):
 def transcribe_audio(segment):
     audio_path, start_time, duration = segment
     print(f"Transcribing audio from {start_time} to {start_time + duration} seconds...")
-
     recognizer = sr.Recognizer()
     with sr.AudioFile(audio_path) as source:
         audio_data = recognizer.record(source, duration=duration, offset=start_time)
         try:
             transcription = recognizer.recognize_google(audio_data)
-            print(f"Transcribed segment: {transcription[:50]}...")
-            return transcription
+            # Format timestamp as [hh:mm:ss] and append to transcription
+            timestamp = f"[{time.strftime('%H:%M:%S', time.gmtime(start_time))}] "
+            return timestamp + transcription
         except sr.UnknownValueError:
-            print("Audio segment is inaudible.")
-            return "[Inaudible]"
+            return f"[{time.strftime('%H:%M:%S', time.gmtime(start_time))}] [Inaudible]"
         except sr.RequestError as e:
-            print(f"Error in speech recognition: {e}")
-            return f"[Error: {e}]"
+            return f"[{time.strftime('%H:%M:%S', time.gmtime(start_time))}] [Error: {e}]"
 
 
 def handle_missing_words(full_transcriptions, three_second_transcriptions, overlap):
@@ -97,57 +96,100 @@ def store_data(db_config, video_url, video_path, audio_path, transcript):
     conn = mysql.connector.connect(**db_config)
     cursor = conn.cursor()
     cursor.execute("USE youtube")
+
+    # Create table if it doesn't exist
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS YoutubeData (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            video_url TEXT,
+            video_path TEXT,
+            audio_path TEXT,
+            transcript TEXT
+        )
+    """)
+
+    # Insert data into the table
     cursor.execute("""
         INSERT INTO YoutubeData (video_url, video_path, audio_path, transcript)
         VALUES (%s, %s, %s, %s)
     """, (video_url, video_path, audio_path, transcript))
+
     conn.commit()
     cursor.close()
     conn.close()
 
+
+def read_youtube_urls(file_path):
+    with open(file_path, 'r') as file:
+        urls = file.readlines()
+    return [url.strip() for url in urls]
+
+
+def video_exists(db_config, video_url):
+    conn = mysql.connector.connect(**db_config)
+    cursor = conn.cursor()
+    cursor.execute("USE youtube")
+    query = "SELECT EXISTS(SELECT 1 FROM YoutubeData WHERE video_url = %s)"
+    cursor.execute(query, (video_url,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return result[0]
+
+
+def process_url(video_url, download_path, db_config):
+    if video_exists(db_config, video_url):
+        print(f"Video {video_url} already processed. Skipping.")
+        return
+
+    print(f"Processing URL: {video_url}")
+    video_path = download_video(video_url, download_path)
+    audio_path = extract_audio(video_path, download_path)
+
+    # Transcription and processing logic
+    segment_duration = 60  # 60 seconds
+    overlap = 3  # 3 seconds overlap
+    total_duration = mp.VideoFileClip(video_path).duration
+
+    full_segments = [(audio_path, i * segment_duration, segment_duration + overlap) for i in
+                     range(int(total_duration / segment_duration))]
+    three_second_segments = [(audio_path, i * segment_duration, overlap) for i in
+                             range(1, int(total_duration / segment_duration))]
+
+    with Pool(28) as pool:
+        full_transcriptions = pool.map(transcribe_audio, full_segments)
+        three_second_transcriptions = pool.map(transcribe_audio, three_second_segments)
+    # ... rest of the code ...
+
+    corrected_transcripts = handle_missing_words(full_transcriptions, three_second_transcriptions, overlap)
+
+    full_transcript = "\n".join(corrected_transcripts)
+    store_data(db_config, video_url, video_path, audio_path, full_transcript)
+
+    # New code to save transcript in the scratch directory
+    transcript_file_path = os.path.join(download_path, os.path.basename(video_path).replace('.mp4', '.txt'))
+    with open(transcript_file_path, 'w') as transcript_file:
+        transcript_file.write(full_transcript)
+
+    print(f"Processing completed for URL: {video_url}")
+    print(f"Transcript saved to {transcript_file_path}")
+
+
 #  test
 
 def main():
-    video_url = "https://www.youtube.com/watch?v=LJA5BQLC9Ds"
-    download_path = "E:/scratch"  # Define the download path
-
-    video_path = download_video(video_url, download_path)
-    audio_full_path = extract_audio(video_path, download_path)  # Pass download_path to the function
-
-    transcript_path = os.path.join(download_path, "transcript.txt")
-
+    youtube_urls_file = "youtube_urls.txt"
+    youtube_urls = read_youtube_urls(youtube_urls_file)
+    download_path = "E:/scratch"  # Define download path
     db_config = {
         'host': 'localhost',
         'user': 'root',
         'password': '',
         'database': 'youtube'
     }
-
-    video_path = download_video(video_url, download_path)
-    audio_path = extract_audio(video_path, download_path)  # audio_path is defined here
-
-    segment_duration = 60
-    overlap = 3
-    total_duration = mp.VideoFileClip(video_path).duration
-
-    audio_full_path = extract_audio(video_path, download_path)
-
-    full_segments = [(audio_full_path, i * segment_duration, segment_duration + overlap) for i in
-                     range(int(total_duration / segment_duration))]
-    three_second_segments = [(audio_full_path, i * segment_duration, overlap) for i in
-                             range(1, int(total_duration / segment_duration))]
-    with Pool() as pool:
-        full_transcriptions = pool.map(transcribe_audio, full_segments)
-        three_second_transcriptions = pool.map(transcribe_audio, three_second_segments)
-
-    corrected_transcripts = handle_missing_words(full_transcriptions, three_second_transcriptions, overlap)
-
-    create_database_and_table(db_config)
-    full_transcript = "\n".join(corrected_transcripts)
-    store_data(db_config, video_url, video_path, audio_path, full_transcript)
-
-    with open(transcript_path, "w") as file:
-        file.write(full_transcript)
+    create_database_and_table(db_config)  # Ensure this is called before processing UR
+    for video_url in youtube_urls:
+        process_url(video_url, download_path, db_config)
 
 
 if __name__ == "__main__":
